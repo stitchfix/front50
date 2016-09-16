@@ -16,12 +16,21 @@
 
 package com.netflix.spinnaker.front50.controllers
 
-import com.netflix.spinnaker.front50.pipeline.StrategyRepository
+import com.netflix.spinnaker.front50.model.pipeline.Pipeline
+import com.netflix.spinnaker.front50.model.pipeline.PipelineStrategyDAO
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.http.HttpStatus
+import org.springframework.security.access.AccessDeniedException
+import org.springframework.security.access.prepost.PostAuthorize
+import org.springframework.security.access.prepost.PostFilter
+import org.springframework.security.access.prepost.PreAuthorize
+import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestMethod
+import org.springframework.web.bind.annotation.RequestParam
+import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
 
 /**
@@ -32,21 +41,33 @@ import org.springframework.web.bind.annotation.RestController
 class StrategyController {
 
     @Autowired
-    StrategyRepository strategyRepository
+    PipelineStrategyDAO pipelineStrategyDAO
 
+    @PreAuthorize("@fiatPermissionEvaluator.storeWholePermission()")
+    @PostFilter("hasPermission(filterObject.application, 'APPLICATION', 'READ')")
     @RequestMapping(value = '', method = RequestMethod.GET)
-    List<Map> list() {
-        strategyRepository.list()
+    List<Pipeline> list() {
+        pipelineStrategyDAO.all()
     }
 
+    @PreAuthorize("hasPermission(#application, 'APPLICATION', 'READ')")
     @RequestMapping(value = '{application:.+}', method = RequestMethod.GET)
-    List<Map> listByApplication(@PathVariable(value = 'application') String application) {
-        strategyRepository.getPipelinesByApplication(application)
+    List<Pipeline> listByApplication(@PathVariable(value = 'application') String application) {
+        pipelineStrategyDAO.getPipelinesByApplication(application)
     }
 
+    @PostFilter("hasPermission(filterObject.application, 'APPLICATION', 'READ')")
+    @RequestMapping(value = '{id:.+}/history', method = RequestMethod.GET)
+    Collection<Pipeline> getHistory(@PathVariable String id,
+                                    @RequestParam(value = "limit", defaultValue = "20") int limit) {
+        return pipelineStrategyDAO.getPipelineHistory(id, limit)
+    }
+
+    @PreAuthorize("hasPermission(#strategy.application, 'APPLICATION', 'WRITE')")
     @RequestMapping(value = '', method = RequestMethod.POST)
-    void save(@RequestBody Map strategy) {
+    void save(@RequestBody Pipeline strategy) {
         if (!strategy.id) {
+            checkForDuplicatePipeline(strategy.getApplication(), strategy.getName())
             // ensure that cron triggers are assigned a unique identifier for new strategies
             def triggers = (strategy.triggers ?: []) as List<Map>
             triggers.findAll { it.type == "cron" }.each { Map trigger ->
@@ -54,33 +75,61 @@ class StrategyController {
             }
         }
 
-        strategyRepository.save(strategy)
+        pipelineStrategyDAO.create(strategy.getId(), strategy)
     }
 
+    @PreAuthorize("@fiatPermissionEvaluator.isAdmin()")
     @RequestMapping(value = 'batchUpdate', method = RequestMethod.POST)
-    void batchUpdate(@RequestBody List<Map> strategies) {
-        strategyRepository.batchUpdate(strategies)
+    void batchUpdate(@RequestBody List<Pipeline> strategies) {
+        pipelineStrategyDAO.bulkImport(strategies)
     }
 
+    @PreAuthorize("hasPermission(#application, 'APPLICATION', 'WRITE')")
     @RequestMapping(value = '{application}/{strategy:.+}', method = RequestMethod.DELETE)
     void delete(@PathVariable String application, @PathVariable String strategy) {
-        strategyRepository.delete(application, strategy)
+        pipelineStrategyDAO.delete(
+            pipelineStrategyDAO.getPipelineId(application, strategy)
+        )
     }
 
-    @RequestMapping(value = 'deleteById/{id:.+}', method = RequestMethod.DELETE)
     void delete(@PathVariable String id) {
-        strategyRepository.deleteById(id)
+        pipelineStrategyDAO.delete(id)
     }
 
+    @PreAuthorize("hasPermission(#command.application, 'APPLICATION', 'WRITE')")
     @RequestMapping(value = 'move', method = RequestMethod.POST)
     void rename(@RequestBody RenameCommand command) {
-        strategyRepository.rename(command.application, command.from, command.to)
+        checkForDuplicatePipeline(command.application, command.to)
+        def pipelineId = pipelineStrategyDAO.getPipelineId(command.application, command.from)
+        def pipeline = pipelineStrategyDAO.findById(pipelineId)
+        pipeline.setName(command.to)
+
+        pipelineStrategyDAO.update(pipelineId, pipeline)
     }
+
+    private void checkForDuplicatePipeline(String application, String name) {
+        if (pipelineStrategyDAO.getPipelinesByApplication(application).any { it.getName() == name}) {
+            throw new DuplicateStrategyException()
+        }
+    }
+
+    @ExceptionHandler(DuplicateStrategyException)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    Map handleDuplicateStrategyNameException() {
+        return [error: "A strategy with that name already exists in that application", status: HttpStatus.BAD_REQUEST]
+    }
+
+    @ExceptionHandler(AccessDeniedException)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    Map handleAccessDeniedException(AccessDeniedException ade) {
+        return [error: "Access is denied", status: HttpStatus.FORBIDDEN.value()]
+    }
+
+    static class DuplicateStrategyException extends Exception {}
 
     static class RenameCommand {
         String application
         String from
         String to
     }
-
 }

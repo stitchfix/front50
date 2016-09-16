@@ -24,7 +24,7 @@ buildscript {
   }
   dependencies {
     classpath 'com.netflix.spinnaker.gradle:spinnaker-gradle-project:3.5.0'
-    classpath "org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}" 
+    classpath "org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}"
   }
 }
 
@@ -35,7 +35,7 @@ allprojects { project ->
   group = "com.netflix.spinnaker.front50"
 
   spinnaker {
-    dependenciesVersion = "0.25.0"
+    dependenciesVersion = "0.48.0"
   }
   test {
     testLogging {
@@ -58,6 +58,9 @@ allprojects { project ->
         }
         if (it.requested.group == "org.apache.xbean") {
           it.useVersion "4.4"
+        }
+        if (it.requested.group == "org.springframework.data" && it.requested.name == "spring-data-commons") {
+          it.useVersion "1.12.0.RELEASE"
         }
       }
     }

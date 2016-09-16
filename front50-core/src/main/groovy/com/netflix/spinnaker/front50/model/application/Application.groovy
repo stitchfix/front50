@@ -23,6 +23,13 @@ import com.fasterxml.jackson.annotation.JsonIgnore
 import com.netflix.spinnaker.front50.events.ApplicationEventListener
 import com.netflix.spinnaker.front50.exception.ApplicationAlreadyExistsException
 import com.netflix.spinnaker.front50.exception.NotFoundException
+import com.netflix.spinnaker.front50.model.Timestamped
+import com.netflix.spinnaker.front50.model.notification.HierarchicalLevel
+import com.netflix.spinnaker.front50.model.notification.NotificationDAO
+import com.netflix.spinnaker.front50.model.pipeline.Pipeline
+import com.netflix.spinnaker.front50.model.pipeline.PipelineDAO
+import com.netflix.spinnaker.front50.model.pipeline.PipelineStrategyDAO
+import com.netflix.spinnaker.front50.model.project.ProjectDAO
 import com.netflix.spinnaker.front50.validator.ApplicationValidationErrors
 import com.netflix.spinnaker.front50.validator.ApplicationValidator
 import groovy.transform.Canonical
@@ -34,15 +41,21 @@ import org.springframework.validation.Errors
 
 @ToString
 @Slf4j
-class Application {
+class Application implements Timestamped {
   String name
   String description
   String email
   String accounts
   String updateTs
   String createTs
+  String lastModifiedBy
 
   private Map<String, Object> details = new HashMap<String, Object>()
+
+  String getName() {
+    // there is an expectation that application names are uppercased (historical)
+    return name?.toUpperCase()
+  }
 
   @JsonAnyGetter
   public Map<String,Object> details() {
@@ -69,6 +82,18 @@ class Application {
 
   @JsonIgnore
   ApplicationDAO dao
+
+  @JsonIgnore
+  ProjectDAO projectDao
+
+  @JsonIgnore
+  NotificationDAO notificationDao
+
+  @JsonIgnore
+  PipelineDAO pipelineDao
+
+  @JsonIgnore
+  PipelineStrategyDAO pipelineStrategyDao
 
   @JsonIgnore
   Collection<ApplicationValidator> validators
@@ -130,6 +155,7 @@ class Application {
         applicationEventListeners.findAll { it.supports(ApplicationEventListener.Type.POST_DELETE) },
         { Application originalApplication, Application modifiedApplication ->
           // onSuccess
+          deleteApplicationComponents(currentApplication.name)
           this.dao.delete(currentApplication.name)
           return null
         },
@@ -141,6 +167,37 @@ class Application {
         currentApplication,
         null
     )
+  }
+
+  private void deleteApplicationComponents(String application) {
+    removeApplicationFromProjects(application)
+    deleteApplicationNotifications(application)
+    deletePipelines(application)
+  }
+
+  private void removeApplicationFromProjects(String application) {
+    projectDao.all().findAll {
+        it.config.applications.contains(application.toLowerCase())
+      }.each {
+        it.config.applications.remove(application.toLowerCase())
+        it.config.clusters.each { cluster ->
+          cluster.applications.remove(application.toLowerCase())
+        }
+        if (it.config.applications.empty) {
+          projectDao.delete(it.id)
+        } else {
+          projectDao.update(it.id, it)
+        }
+      }
+  }
+
+  private void deleteApplicationNotifications(String application) {
+    notificationDao.delete(HierarchicalLevel.APPLICATION, application)
+  }
+
+  private void deletePipelines(String application) {
+    pipelineDao.getPipelinesByApplication(application).each { Pipeline p -> pipelineDao.delete(p.id) }
+    pipelineStrategyDao.getPipelinesByApplication(application).each { Pipeline p -> pipelineStrategyDao.delete(p.id) }
   }
 
   Application clear() {
@@ -248,9 +305,9 @@ class Application {
         updatedApplication = it.call(copy(copyOfOriginalApplication), copy(updatedApplication)) as Application
         invokedEventListeners << it
       }
-      onSuccess.call(copy(copyOfOriginalApplication), copy(updatedApplication))
+      updatedApplication = onSuccess.call(copy(copyOfOriginalApplication), copy(updatedApplication))
       postApplicationEventListeners.each {
-        it.call(copy(copyOfOriginalApplication), copy(updatedApplication))
+        updatedApplication = it.call(copy(copyOfOriginalApplication), copy(updatedApplication))
         invokedEventListeners << it
       }
 
@@ -269,9 +326,26 @@ class Application {
         log.error("Rollback failed (onRollback)", rollbackException)
       }
 
-      log.error("Failed to perform action (name: ${originalApplication.name ?: updatedApplication.name})")
+      log.error("Failed to perform action (name: ${originalApplication?.name ?: updatedApplication?.name})")
       throw e
     }
+  }
+
+  @Override
+  @JsonIgnore()
+  String getId() {
+    return name.toLowerCase()
+  }
+
+  @Override
+  @JsonIgnore
+  Long getLastModified() {
+    return updateTs ? Long.valueOf(updateTs) : null
+  }
+
+  @Override
+  void setLastModified(Long lastModified) {
+    this.updateTs = lastModified.toString()
   }
 
   private static Application copy(Application source) {
@@ -281,5 +355,18 @@ class Application {
   @Canonical
   static class ValidationException extends RuntimeException {
     Errors errors
+  }
+
+  static class Permission implements Timestamped {
+    String name
+    Long lastModified
+    String lastModifiedBy
+    List<String> requiredGroupMembership
+
+    @Override
+    @JsonIgnore()
+    String getId() {
+      return name.toLowerCase()
+    }
   }
 }

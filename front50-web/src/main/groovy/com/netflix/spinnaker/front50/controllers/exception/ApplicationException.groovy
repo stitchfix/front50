@@ -17,12 +17,10 @@
 
 package com.netflix.spinnaker.front50.controllers.exception
 
+import groovy.transform.InheritConstructors
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.ResponseStatus
 
+@InheritConstructors
 @ResponseStatus(value = HttpStatus.SERVICE_UNAVAILABLE, reason = "Exception, baby")
-class ApplicationException extends RuntimeException {
-  public ApplicationException(Throwable cause) {
-    super(cause)
-  }
-}
+class ApplicationException extends RuntimeException {}

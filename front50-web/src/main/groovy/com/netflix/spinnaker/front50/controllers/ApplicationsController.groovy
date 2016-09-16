@@ -21,6 +21,10 @@ import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.front50.events.ApplicationEventListener
 import com.netflix.spinnaker.front50.model.application.Application
 import com.netflix.spinnaker.front50.model.application.ApplicationDAO
+import com.netflix.spinnaker.front50.model.notification.NotificationDAO
+import com.netflix.spinnaker.front50.model.pipeline.PipelineDAO
+import com.netflix.spinnaker.front50.model.pipeline.PipelineStrategyDAO
+import com.netflix.spinnaker.front50.model.project.ProjectDAO
 import com.netflix.spinnaker.front50.validator.ApplicationValidator
 import groovy.util.logging.Slf4j
 import io.swagger.annotations.Api
@@ -29,6 +33,10 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.MessageSource
 import org.springframework.context.i18n.LocaleContextHolder
 import org.springframework.http.HttpStatus
+import org.springframework.security.access.AccessDeniedException
+import org.springframework.security.access.prepost.PostAuthorize
+import org.springframework.security.access.prepost.PostFilter
+import org.springframework.security.access.prepost.PreAuthorize
 import org.springframework.validation.Errors
 import org.springframework.validation.ObjectError
 import org.springframework.web.bind.annotation.*
@@ -36,7 +44,7 @@ import org.springframework.web.bind.annotation.*
 import javax.servlet.http.HttpServletResponse
 
 @Slf4j
-@RestController
+@RestController("legacyApplicationsController")
 @RequestMapping(["/default/applications", "/global/applications"])
 @Api(value = "application", description = "Application API")
 public class ApplicationsController {
@@ -47,6 +55,18 @@ public class ApplicationsController {
   ApplicationDAO applicationDAO
 
   @Autowired
+  ProjectDAO projectDAO
+
+  @Autowired
+  NotificationDAO notificationDAO
+
+  @Autowired
+  PipelineDAO pipelineDAO
+
+  @Autowired
+  PipelineStrategyDAO pipelineStrategyDAO
+
+  @Autowired
   List<ApplicationValidator> applicationValidators
 
   @Autowired(required = false)
@@ -55,6 +75,8 @@ public class ApplicationsController {
   @Autowired
   Registry registry
 
+  @PreAuthorize("@fiatPermissionEvaluator.storeWholePermission()")
+  @PostFilter("hasPermission(filterObject.name, 'APPLICATION', 'READ')")
   @RequestMapping(value = "/search", method = RequestMethod.GET)
   @ApiOperation(value = "", notes = """Search for applications within a specific `account` given one or more attributes.
 
@@ -65,12 +87,15 @@ public class ApplicationsController {
     return getApplication().search(params)
   }
 
+  @PreAuthorize("@fiatPermissionEvaluator.storeWholePermission()")
+  @PostFilter("hasPermission(filterObject.name, 'APPLICATION', 'READ')")
   @ApiOperation(value = "", notes = "Fetch all applications within a specific `account`")
   @RequestMapping(method = RequestMethod.GET)
   Set<Application> applications() {
     return getApplication().findAll()
   }
 
+  @PreAuthorize("hasPermission(#app.name, 'APPLICATION', 'WRITE')")
   @ApiOperation(value = "", notes = "Update an existing application within a specific `account`")
   @RequestMapping(method = RequestMethod.PUT)
   Application put(@RequestBody final Application app) {
@@ -80,12 +105,14 @@ public class ApplicationsController {
     return app
   }
 
+  // TODO(ttomsu): Think through application creation permissions.
   @ApiOperation(value = "", notes = "Create an application within a specific `account`")
   @RequestMapping(method = RequestMethod.POST, value = "/name/{application:.+}")
   Application post(@RequestBody final Application app) {
     return getApplication().initialize(app).withName(app.getName()).save()
   }
 
+  @PreAuthorize("hasPermission(#application, 'APPLICATION', 'WRITE')")
   @ApiOperation(value = "", notes = "Delete an application from a specific `account`")
   @RequestMapping(method = RequestMethod.DELETE, value = "/name/{application:.+}")
   void delete(@PathVariable String application, HttpServletResponse response) {
@@ -93,10 +120,26 @@ public class ApplicationsController {
     response.setStatus(HttpStatus.ACCEPTED.value())
   }
 
+  // This method uses @PostAuthorize in order to throw 404s if the application doesn't exist,
+  // vs. 403s if the app exists, but the user doesn't have access to it.
+  @PostAuthorize("hasPermission(#application, 'APPLICATION', 'READ')")
   @ApiOperation(value = "", notes = "Fetch a single application by name within a specific `account`")
   @RequestMapping(method = RequestMethod.GET, value = "/name/{application:.+}")
   Application getByName(@PathVariable final String application) {
     return getApplication().findByName(application)
+  }
+
+  @PreAuthorize("hasPermission(#application, 'APPLICATION', 'READ')")
+  @RequestMapping(value = '{application:.+}/history', method = RequestMethod.GET)
+  Collection<Application> getHistory(@PathVariable String application,
+                                     @RequestParam(value = "limit", defaultValue = "20") int limit) {
+    return applicationDAO.getApplicationHistory(application, limit)
+  }
+
+  @PreAuthorize("@fiatPermissionEvaluator.isAdmin()")
+  @RequestMapping(method = RequestMethod.POST, value = "/batchUpdate")
+  void batchUpdate(@RequestBody final Collection<Application> applications) {
+    applicationDAO.bulkImport(applications)
   }
 
   @ExceptionHandler(Application.ValidationException)
@@ -113,9 +156,19 @@ public class ApplicationsController {
     return [error: "Validation Failed.", errors: errorStrings, status: HttpStatus.BAD_REQUEST]
   }
 
+  @ExceptionHandler(AccessDeniedException)
+  @ResponseStatus(HttpStatus.FORBIDDEN)
+  Map handleAccessDeniedException(AccessDeniedException ade) {
+    return [error: "Access is denied", status: HttpStatus.FORBIDDEN.value()]
+  }
+
   private Application getApplication() {
     return new Application(
         dao: applicationDAO,
+        projectDao: projectDAO,
+        notificationDao: notificationDAO,
+        pipelineDao: pipelineDAO,
+        pipelineStrategyDao: pipelineStrategyDAO,
         validators: applicationValidators,
         applicationEventListeners: applicationEventListeners
     )
